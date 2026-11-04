@@ -1,0 +1,126 @@
+/* Screen Time Stats · v1.0.0 — drawer + แถบเลื่อนที่วาดเอง */
+
+.sts-settings .sts-stage-tag {
+    display: inline-block;
+    padding: 2px 10px;
+    margin-bottom: 8px;
+    border-radius: 999px;
+    font-size: 0.75em;
+    background: var(--SmartThemeBlurTintColor);
+    color: var(--SmartThemeQuoteColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+}
+
+.sts-settings .sts-hint {
+    margin: 4px 0 8px;
+    font-size: 0.85em;
+    opacity: 0.7;
+}
+
+.sts-field-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 0.85em;
+    margin: 10px 0 6px;
+}
+
+.sts-value-pill {
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    background: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeBlurTintColor);
+}
+
+.sts-value-pill.sts-pulse { animation: sts-pop 0.28s ease; }
+@keyframes sts-pop { 0%{transform:scale(1)} 45%{transform:scale(1.18)} 100%{transform:scale(1)} }
+
+/* ── แถบเลื่อน: วาดเองทั้งชิ้น ไม่ใช้ accent-color อีก ── */
+.sts-range {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    width: 100%;
+    height: 30px;
+    margin: 2px 0 4px;
+    padding: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+/* ราง — Chrome / Safari / Edge */
+.sts-range::-webkit-slider-runnable-track {
+    height: 8px;
+    border-radius: 99px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128,128,128,0.45));
+    /* จุดตัดสีมาจาก --sts-pct ที่ JS อัปเดตทุกครั้งที่ลาก */
+    background: linear-gradient(
+        90deg,
+        var(--SmartThemeQuoteColor, #8ab4ff) 0%,
+        var(--SmartThemeEmColor, #c8a2ff) var(--sts-pct, 50%),
+        rgba(128,128,128,0.18) var(--sts-pct, 50%),
+        rgba(128,128,128,0.18) 100%
+    );
+}
+
+/* ราง — Firefox */
+.sts-range::-moz-range-track {
+    height: 8px;
+    border-radius: 99px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(128,128,128,0.45));
+    background: rgba(128,128,128,0.18);
+}
+.sts-range::-moz-range-progress {
+    height: 8px;
+    border-radius: 99px;
+    background: linear-gradient(90deg,
+        var(--SmartThemeQuoteColor, #8ab4ff),
+        var(--SmartThemeEmColor, #c8a2ff));
+}
+
+/* ปุ่ม — Chrome / Safari / Edge */
+.sts-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 22px;
+    height: 22px;
+    margin-top: -8px;
+    border-radius: 50%;
+    background: var(--SmartThemeBlurTintColor, #fff);
+    border: 3px solid var(--SmartThemeQuoteColor, #8ab4ff);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    transition: transform 0.14s ease;
+}
+.sts-range:active::-webkit-slider-thumb { transform: scale(1.18); }
+
+/* ปุ่ม — Firefox */
+.sts-range::-moz-range-thumb {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--SmartThemeBlurTintColor, #fff);
+    border: 3px solid var(--SmartThemeQuoteColor, #8ab4ff);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.sts-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.85em;
+    margin: 9px 0;
+}
+
+.sts-btn-row { display: flex; gap: 6px; margin: 6px 0; }
+.sts-btn-row .menu_button {
+    flex: 1 1 0;
+    min-height: 34px;
+    font-size: 0.8em;
+    white-space: nowrap;
+}
+
+#sts_devbox { display: none; }
+#sts_devbox.sts-shown { display: block; }

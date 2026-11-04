@@ -1,0 +1,8 @@
+{
+    "display_name": "Screen Time Stats",
+    "loading_order": 100,
+    "js": "index.js",
+    "css": "style.css",
+    "author": "maanfhun",
+    "version": "1.0.0"
+}
