@@ -1,6 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import { connectionBody, connectionInfo } from './st-settings.mjs';
+import { chatModelFor, connectionBody, connectionInfo, textgenInfo } from './st-settings.mjs';
 import { httpError } from './util.mjs';
 
 // Model calls go through SillyTavern's own endpoint
@@ -8,6 +8,23 @@ import { httpError } from './util.mjs';
 // SillyTavern adds the API key on its side, so the key never reaches this plugin.
 
 const GENERATE_PATH = '/api/backends/chat-completions/generate';
+const TEXT_GENERATE_PATH = '/api/backends/text-completions/generate';
+const STATUS_PATH = '/api/backends/chat-completions/status';
+
+// Claude is the recommendation, not a requirement: these are used only when the
+// source is Claude and the user left the model field empty.
+export const RECOMMENDED = {
+    claude: { scan: 'claude-haiku-5-5', heavy: 'claude-opus-5-5' },
+};
+export const CLAUDE_MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-opus-5'];
+
+const OPENAI_FAMILY = ['openai', 'azure_openai', 'openrouter'];
+// OpenAI reasoning models take max_completion_tokens and reasoning_effort (same rule as SillyTavern's client).
+function isOpenAiReasoning(source, model) {
+    if (!OPENAI_FAMILY.includes(source)) return false;
+    if (/gpt-5|gpt-6/.test(model)) return true;
+    return source === 'openrouter' ? /^openai\/(o1|o3|o4)/.test(model) : /^(o1|o3|o4)/.test(model);
+}
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Captures what is needed to call SillyTavern back as the same user. Kept in memory only. */
@@ -86,7 +103,38 @@ export function extractText(data) {
     if (typeof data.choices?.[0]?.text === 'string') return data.choices[0].text;
     if (typeof data.text === 'string') return data.text;
     if (typeof data.output === 'string') return data.output;
+    if (typeof data.content === 'string') return data.content; // llama.cpp
+    if (typeof data.response === 'string') return data.response; // Ollama
     return '';
+}
+
+/** Reasoning models on some providers put their thoughts into the text. */
+export function stripThinking(text) {
+    return String(text ?? '')
+        .replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, '')
+        .replace(/^[\s\S]*?<\/(think|thinking)>/i, '')
+        .trim();
+}
+
+/** Builds a Text Completion prompt with the instruct template chosen in SillyTavern. */
+export function instructPrompt(instruct, system, user) {
+    if (!instruct?.enabled) {
+        return { prompt: `${system}\n\n${user}\n\nОтвет:\n`, stop: [] };
+    }
+    const sep = instruct.wrap ? '\n' : '';
+    const block = (prefix, text, suffix) => `${prefix || ''}${prefix ? sep : ''}${text}${suffix || sep}`;
+    let prompt;
+    if (instruct.system_same_as_user || !instruct.system_sequence) {
+        prompt = block(instruct.input_sequence, `${system}\n\n${user}`, instruct.input_suffix);
+    } else {
+        prompt = block(instruct.system_sequence, system, instruct.system_suffix) + block(instruct.input_sequence, user, instruct.input_suffix);
+    }
+    const output = instruct.last_output_sequence || instruct.output_sequence || '';
+    prompt += `${output}${output ? sep : ''}`;
+    const stop = [instruct.stop_sequence, instruct.input_sequence, instruct.system_sequence]
+        .map(x => String(x || '').trim())
+        .filter(Boolean);
+    return { prompt, stop: [...new Set(stop)] };
 }
 
 /** Finds the first JSON object or array in a model reply (fenced or bare). */
@@ -136,46 +184,110 @@ export class LlmClient {
         return Boolean(this.auth && this.auth.port);
     }
 
+    /** Works out which API, source and model a task uses. */
     resolve(task) {
+        return this.resolveTier(this.settings.tasks?.[task] === 'scan' ? 'scan' : 'heavy');
+    }
+
+    resolveTier(tier) {
         const conn = connectionInfo(this.stSettings);
         const models = this.settings.models;
-        const tier = this.settings.tasks?.[task] === 'scan' ? 'scan' : 'heavy';
-        const source = models.source || conn.source;
-        const model = (tier === 'scan' ? models.scan : models.heavy) || conn.model;
-        const effort = tier === 'scan' ? models.scanEffort : models.heavyEffort;
-        return { source, model, tier, effort };
+        const chosenSource = models[`${tier}Source`] || '';
+        const effort = models[`${tier}Effort`] || 'auto';
+        const explicit = (models[tier] || '').trim();
+
+        // "As in SillyTavern" with Text Completion selected there.
+        if (!chosenSource && conn.api === 'text') {
+            const text = textgenInfo(this.stSettings);
+            return {
+                api: 'text', tier, effort, source: text.type, model: explicit || text.model,
+                why: explicit ? 'своя' : 'как в SillyTavern',
+                maxTokens: Number(models[`${tier}MaxTokens`]) || (tier === 'scan' ? 2048 : 4096),
+            };
+        }
+
+        const source = chosenSource || conn.source;
+        let model = explicit;
+        let why = 'своя';
+        if (!model && RECOMMENDED[source]) {
+            model = RECOMMENDED[source][tier];
+            why = 'рекомендация';
+        }
+        if (!model) {
+            model = chatModelFor(this.stSettings, source);
+            why = 'как в SillyTavern';
+        }
+        const autoMax = source === 'claude' ? (tier === 'scan' ? 6000 : 16000) : (tier === 'scan' ? 4096 : 8192);
+        return { api: 'chat', tier, effort, source, model, why, maxTokens: Number(models[`${tier}MaxTokens`]) || autoMax };
+    }
+
+    chatBody(r, system, user) {
+        const body = {
+            chat_completion_source: r.source,
+            model: r.model,
+            messages: [
+                { role: 'system', content: system },
+                { role: 'user', content: user },
+            ],
+            max_tokens: r.maxTokens,
+            stream: false,
+            ...connectionBody(this.stSettings, r.source),
+        };
+        if (isOpenAiReasoning(r.source, r.model)) {
+            body.max_completion_tokens = body.max_tokens;
+            delete body.max_tokens;
+            if (r.effort !== 'auto') body.reasoning_effort = r.effort;
+        } else if (r.source === 'claude' && r.effort !== 'auto') {
+            body.reasoning_effort = r.effort;
+        }
+        return body;
+    }
+
+    textBody(r, system, user) {
+        const text = textgenInfo(this.stSettings);
+        if (!text.server) throw httpError(400, 'В SillyTavern не указан адрес сервера Text Completion');
+        const { prompt, stop } = instructPrompt(this.stSettings?.power_user?.instruct, system, user);
+        const max = r.maxTokens;
+        return {
+            api_type: text.type,
+            api_server: text.server,
+            prompt,
+            model: r.model || undefined,
+            max_new_tokens: max,
+            max_tokens: max,
+            n_predict: max,
+            num_predict: max,
+            stop,
+            stopping_strings: stop,
+            stream: false,
+        };
     }
 
     /**
      * One request, one answer. Sampling parameters are left out on purpose:
-     * current Claude models reject non-default temperature/top_p/top_k.
+     * the provider's defaults are fine for analysis, and current Claude models
+     * reject non-default temperature/top_p/top_k.
      */
     async complete({ task, system, user, maxTokens }) {
         if (!this.available) {
             throw httpError(409, 'Нет связи с сессией SillyTavern. Откройте приложение, чтобы проверка с моделью заработала');
         }
-        const { source, model, tier, effort } = this.resolve(task);
-        if (!source) throw httpError(400, 'В SillyTavern не выбран источник Chat Completion');
-        if (!model) throw httpError(400, 'Не задана модель для этой задачи. Укажите её в настройках');
-
-        const body = {
-            chat_completion_source: source,
-            model,
-            messages: [
-                { role: 'system', content: system },
-                { role: 'user', content: user },
-            ],
-            max_tokens: maxTokens ?? (tier === 'scan' ? 6000 : 16000),
-            stream: false,
-            type: 'quiet',
-            ...connectionBody(this.stSettings, source),
-        };
-        if (source === 'claude' && effort && effort !== 'auto') {
-            body.reasoning_effort = effort;
+        const conn = connectionInfo(this.stSettings);
+        const r = this.resolve(task);
+        if (maxTokens) r.maxTokens = maxTokens;
+        if (r.api === 'chat' && !r.source) {
+            throw httpError(400, conn.api === 'other'
+                ? 'Этот тип API SillyTavern Корректор не поддерживает. Выберите источник модели в настройках Корректора'
+                : 'В SillyTavern не выбран источник Chat Completion');
         }
+        if (r.api === 'chat' && !r.model) throw httpError(400, 'Не задана модель для этой задачи. Укажите её в настройках');
+
+        const path = r.api === 'text' ? TEXT_GENERATE_PATH : GENERATE_PATH;
+        const body = r.api === 'text' ? this.textBody(r, system, user) : this.chatBody(r, system, user);
+        const label = r.model || r.source;
 
         this.calls++;
-        const res = await postToSillyTavern(this.auth, GENERATE_PATH, body);
+        const res = await postToSillyTavern(this.auth, path, body);
         if (res.status === 403) {
             throw httpError(401, 'SillyTavern отклонил запрос: сессия устарела. Откройте приложение заново');
         }
@@ -187,17 +299,33 @@ export class LlmClient {
         }
         if (res.status >= 400 || data?.error) {
             const message = typeof data?.error?.message === 'string' ? data.error.message
-                : typeof data === 'string' && data ? data.slice(0, 300)
-                    : 'подробности в консоли SillyTavern';
-            throw httpError(502, `Модель ${model} вернула ошибку: ${message}`);
+                : typeof data?.message === 'string' ? data.message
+                    : typeof data === 'string' && data ? data.slice(0, 300)
+                        : 'подробности в консоли SillyTavern';
+            throw httpError(502, `Модель ${label} вернула ошибку: ${message}`);
         }
-        const text = extractText(data).trim();
-        if (!text) throw httpError(502, `Модель ${model} вернула пустой ответ`);
-        return { text, model, source, tier };
+        const text = stripThinking(extractText(data));
+        if (!text) throw httpError(502, `Модель ${label} вернула пустой ответ`);
+        return { text, model: label, source: r.source, tier: r.tier };
     }
 
     async completeJson(options) {
         const result = await this.complete(options);
         return { ...result, json: extractJson(result.text) };
+    }
+
+    /** Model ids the provider offers, asked through SillyTavern with its key. */
+    async listModels(source) {
+        if (source === 'claude') return CLAUDE_MODELS;
+        if (!this.available || !source) return [];
+        const res = await postToSillyTavern(this.auth, STATUS_PATH, { chat_completion_source: source, ...connectionBody(this.stSettings, source) });
+        let data = null;
+        try {
+            data = JSON.parse(res.text);
+        } catch {
+            return [];
+        }
+        const list = Array.isArray(data?.data) ? data.data : Array.isArray(data?.data?.data) ? data.data.data : Array.isArray(data) ? data : [];
+        return [...new Set(list.map(m => (typeof m === 'string' ? m : m?.id)).filter(Boolean))].slice(0, 1000);
     }
 }

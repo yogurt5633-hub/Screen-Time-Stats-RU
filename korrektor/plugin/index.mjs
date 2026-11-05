@@ -205,13 +205,22 @@ export async function init(router) {
             version: VERSION,
             user: user.ctx.handle,
             connection: connectionInfo(stSettings),
-            models: { scan: llm.resolve('facts'), heavy: llm.resolve('summary') },
+            models: { scan: llm.resolveTier('scan'), heavy: llm.resolveTier('heavy') },
             open: proposals.filter(p => OPEN_STATUSES.includes(p.status)).length,
             lastScan: state.lastScan ?? null,
             scanning: publicJob(runningJob(user.ctx.handle, 'scan')),
             termux: termuxAvailable(),
             time: nowIso(),
         };
+    }));
+
+    // Models the provider offers, fetched by SillyTavern with its own key.
+    router.get('/models', route(async (req, user) => {
+        const llm = await llmFor(user);
+        const conn = connectionInfo(llm.stSettings);
+        if (!req.query.source && conn.api === 'text') return { source: conn.textType, items: conn.textModel ? [conn.textModel] : [] };
+        const source = String(req.query.source || '') || conn.source;
+        return { source, items: await llm.listModels(source) };
     }));
 
     router.get('/settings', route(async (req, user) => user.store.getSettings()));

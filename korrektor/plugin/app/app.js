@@ -54,7 +54,18 @@ const ANALYZERS = [
     ['loreKeys', 'Плохие ключи', 'Без модели'],
     ['bloat', 'Раздутые карточки и записи', 'Без модели, сжатие делает модель'],
 ];
-const MODEL_PRESETS = ['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'];
+// Chat Completion sources of SillyTavern. Any of them works if its key is saved in SillyTavern.
+const SOURCES = [
+    ['claude', 'Claude'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['makersuite', 'Google AI Studio'],
+    ['vertexai', 'Google Vertex AI'], ['deepseek', 'DeepSeek'], ['mistralai', 'Mistral'], ['xai', 'xAI'],
+    ['groq', 'Groq'], ['cohere', 'Cohere'], ['perplexity', 'Perplexity'], ['moonshot', 'Moonshot'],
+    ['zai', 'Z.AI'], ['chutes', 'Chutes'], ['nanogpt', 'NanoGPT'], ['electronhub', 'Electron Hub'],
+    ['aimlapi', 'AI/ML API'], ['fireworks', 'Fireworks'], ['cometapi', 'CometAPI'], ['siliconflow', 'SiliconFlow'],
+    ['minimax', 'MiniMax'], ['pollinations', 'Pollinations'], ['workers_ai', 'Workers AI'], ['azure_openai', 'Azure OpenAI'],
+    ['ai21', 'AI21'], ['custom', 'Свой адрес (Custom)'],
+];
+const SOURCE_NAME = Object.fromEntries(SOURCES);
+const RECOMMENDED = { scan: 'claude-haiku-5-5', heavy: 'claude-opus-5-5' };
 
 const state = {
     status: null,
@@ -71,6 +82,7 @@ const state = {
     modes: {},
     expanded: {},
     csrf: null,
+    modelLists: {},
     offline: false,
     needLogin: false,
 };
@@ -567,7 +579,7 @@ async function renderProposalSheet(id) {
 
     if (p.status === 'preparing' || (state.job?.kind === 'prepare' && state.job.meta?.id === p.id)) {
         body.push(h('section', { class: 'change' }, h('div', { class: 'change-body' },
-            h('p', { class: 'secondary', style: 'margin:0', text: `Модель ${state.status?.models?.heavy?.model ?? ''} пишет правку. Обычно это занимает до минуты` }))));
+            h('p', { class: 'secondary', style: 'margin:0', text: 'Модель пишет правку. Обычно это занимает до минуты' }))));
     } else if (p.views?.length) {
         body.push(p.views.map((view, i) => renderChange(p, view, i)));
     } else if (p.status === 'needs_fix' || p.status === 'failed') {
@@ -789,6 +801,17 @@ function seg(options, value, onchange) {
         h('button', { type: 'button', 'aria-pressed': String(value === v), onclick: () => onchange(v) }, label)));
 }
 
+async function fillModels(source, datalist) {
+    if (!state.modelLists[source]) {
+        try {
+            state.modelLists[source] = (await api(`/models?source=${encodeURIComponent(source)}`)).items;
+        } catch {
+            state.modelLists[source] = [];
+        }
+    }
+    datalist.replaceChildren(...state.modelLists[source].map(id => h('option', { value: id })));
+}
+
 let saveTimer = null;
 function save(patch, rerender = false) {
     clearTimeout(saveTimer);
@@ -801,6 +824,7 @@ function save(patch, rerender = false) {
         try {
             state.settings = await api('/settings', { method: 'POST', body });
             await loadStatus();
+            if (rerender && currentRoute().name === 'settings') renderSettings(false);
         } catch (error) {
             toast(error.message, true);
         }
@@ -830,18 +854,57 @@ async function renderSettings(reload = true) {
     const s = state.settings;
     const conn = state.status?.connection ?? {};
 
-    const modelInput = (key) => {
-        const input = h('input', { class: 'input mono', list: 'model-presets', value: s.models[key] ?? '', placeholder: conn.model || 'модель', 'aria-label': 'ID модели', autocapitalize: 'off', spellcheck: 'false' });
-        input.addEventListener('change', () => save({ models: { [key]: input.value.trim() } }));
-        return input;
+    const resolved = state.status?.models ?? {};
+    const stApiText = conn.api === 'text'
+        ? `Text Completion · ${conn.textType || '—'}`
+        : conn.api === 'chat' ? `Chat Completion · ${SOURCE_NAME[conn.source] ?? conn.source ?? '—'}` : `${conn.mainApi} (не поддерживается)`;
+    const stModel = conn.api === 'text' ? conn.textModel : conn.model;
+
+    const tierBlock = (tier, title) => {
+        const sourceKey = `${tier}Source`;
+        const effectiveSource = s.models[sourceKey] || (conn.api === 'text' ? '' : conn.source);
+        const source = h('select', { class: 'select', 'aria-label': 'Источник', style: 'flex:1;min-width:0' },
+            h('option', { value: '', text: `Как в SillyTavern (${conn.api === 'text' ? 'Text Completion' : SOURCE_NAME[conn.source] ?? 'не выбран'})` }),
+            SOURCES.map(([v, label]) => h('option', { value: v, text: label })));
+        source.value = s.models[sourceKey] || '';
+        source.addEventListener('change', () => save({ models: { [sourceKey]: source.value, [tier]: '' } }, true));
+
+        const listId = `models-${tier}`;
+        const model = h('input', {
+            class: 'input mono', list: listId, value: s.models[tier] ?? '', style: 'flex:1;min-width:0',
+            placeholder: resolved[tier]?.model || 'модель', 'aria-label': 'ID модели', autocapitalize: 'off', spellcheck: 'false',
+        });
+        model.addEventListener('change', () => save({ models: { [tier]: model.value.trim() } }, true));
+        const datalist = h('datalist', { id: listId });
+        if (effectiveSource) fillModels(effectiveSource, datalist);
+
+        const effort = h('select', { class: 'select', 'aria-label': 'Усилие рассуждения', style: 'flex:1;min-width:0' },
+            [['auto', 'Рассуждение: как у модели'], ['low', 'Рассуждение: низкое'], ['medium', 'Рассуждение: среднее'], ['high', 'Рассуждение: высокое']].map(([v, label]) => h('option', { value: v, text: label })));
+        effort.value = s.models[`${tier}Effort`] || 'auto';
+        effort.addEventListener('change', () => save({ models: { [`${tier}Effort`]: effort.value } }));
+
+        const max = h('input', { class: 'input mono', type: 'number', inputmode: 'numeric', min: 0, step: 256, value: s.models[`${tier}MaxTokens`] || '', placeholder: 'авто', style: 'width:96px;text-align:right', 'aria-label': 'Лимит ответа, токенов' });
+        max.addEventListener('change', () => save({ models: { [`${tier}MaxTokens`]: Number(max.value) || 0 } }));
+
+        const now = resolved[tier];
+        return h('div', { class: 'field' },
+            h('span', { class: 'label', text: title }),
+            h('div', { class: 'field-row' }, source),
+            h('div', { class: 'field-row' }, model, datalist),
+            h('div', { class: 'field-row' }, effort),
+            h('div', { class: 'field-row' }, h('span', { class: 'hint', text: 'Лимит ответа, токенов' }), max),
+            h('span', { class: 'hint', text: now?.model ? `Сейчас: ${now.model} · ${now.why}` : 'Модель не выбрана: укажите её здесь или в SillyTavern' }));
     };
-    const effort = (key) => {
-        const select = h('select', { class: 'select', 'aria-label': 'Усилие' },
-            [['auto', 'Как в ST'], ['low', 'Низкое'], ['medium', 'Среднее'], ['high', 'Высокое']].map(([v, label]) => h('option', { value: v, text: label })));
-        select.value = s.models[key] || 'auto';
-        select.addEventListener('change', () => save({ models: { [key]: select.value } }));
-        return select;
-    };
+
+    const usesClaude = resolved.scan?.source === 'claude' && resolved.heavy?.source === 'claude';
+    const recommendation = h('div', { class: 'field' },
+        h('span', { class: 'hint', text: 'Подойдёт любой ИИ, ключ к которому сохранён в SillyTavern: Корректор просто вызывает его через SillyTavern. Наша рекомендация — Claude: Haiku 5.5 или Sonnet 5.5 для фоновой проверки, Opus 5.5 для сложных правок. С Claude эта пара включается сама, если поле модели пустое' }),
+        h('div', { class: 'field-row', style: 'justify-content:flex-start;gap:8px;margin-top:4px' },
+            !usesClaude ? h('button', { class: 'btn secondary small', type: 'button', onclick: () => save({ models: { scanSource: 'claude', heavySource: 'claude', scan: RECOMMENDED.scan, heavy: RECOMMENDED.heavy } }, true), text: 'Использовать Claude' }) : null,
+            (s.models.scanSource || s.models.heavySource || s.models.scan || s.models.heavy)
+                ? h('button', { class: 'btn quiet small', type: 'button', onclick: () => save({ models: { scanSource: '', heavySource: '', scan: '', heavy: '' } }, true), text: 'Как в SillyTavern' })
+                : null));
+
     const numberField = (label, hint, value, onchange, opts = {}) => {
         const input = h('input', { class: 'input mono', type: 'number', inputmode: 'numeric', value, min: opts.min ?? 0, max: opts.max, step: opts.step ?? 1, style: 'width:96px;text-align:right', 'aria-label': label });
         input.addEventListener('change', () => onchange(Number(input.value)));
@@ -868,26 +931,20 @@ async function renderSettings(reload = true) {
     interval.addEventListener('change', () => save({ scan: { intervalMinutes: Number(interval.value) } }));
 
     view.replaceChildren(
-        h('datalist', { id: 'model-presets' }, MODEL_PRESETS.map(m => h('option', { value: m }))),
-
         h('div', { class: 'section' },
             h('h2', { class: 'section-title', text: 'Подключение' }),
             h('div', { class: 'rows' },
                 h('div', { class: 'field' },
-                    h('div', { class: 'field-row' }, h('span', { class: 'label', text: 'Источник в SillyTavern' }), h('span', { class: 'mono secondary', text: conn.source || 'не выбран' })),
-                    h('div', { class: 'field-row' }, h('span', { class: 'label', text: 'Модель в SillyTavern' }), h('span', { class: 'mono secondary', style: 'overflow-wrap:anywhere;text-align:right', text: conn.model || '—' })),
-                    h('span', { class: 'hint', text: 'Запросы идут через бэкенд SillyTavern с его ключом. Корректор ключ не видит и secrets.json не читает' })))),
+                    h('div', { class: 'field-row' }, h('span', { class: 'label', text: 'API в SillyTavern' }), h('span', { class: 'mono secondary', style: 'text-align:right', text: stApiText })),
+                    h('div', { class: 'field-row' }, h('span', { class: 'label', text: 'Модель в SillyTavern' }), h('span', { class: 'mono secondary', style: 'overflow-wrap:anywhere;text-align:right', text: stModel || '—' })),
+                    h('span', { class: 'hint', text: 'Запросы идут через бэкенд SillyTavern с его ключами. Корректор ключи не видит и secrets.json не читает' })))),
 
         h('div', { class: 'section' },
             h('h2', { class: 'section-title', text: 'Модели' }),
             h('div', { class: 'rows' },
-                h('div', { class: 'field' },
-                    h('span', { class: 'label', text: 'Дешёвая, для фоновой проверки' }),
-                    h('div', { class: 'field-row' }, modelInput('scan'), effort('scanEffort')),
-                    h('span', { class: 'hint', text: 'Пусто = модель, выбранная в SillyTavern. Усилие действует для Claude' })),
-                h('div', { class: 'field' },
-                    h('span', { class: 'label', text: 'Сильная, для сложных правок' }),
-                    h('div', { class: 'field-row' }, modelInput('heavy'), effort('heavyEffort'))))),
+                recommendation,
+                tierBlock('scan', 'Дешёвая, для фоновой проверки'),
+                tierBlock('heavy', 'Сильная, для сложных правок'))),
 
         h('div', { class: 'section' },
             h('h2', { class: 'section-title', text: 'Какая модель для какой задачи' }),

@@ -7,12 +7,19 @@ import { readJson, withLock, writeJson } from './util.mjs';
 
 export const DEFAULT_SETTINGS = Object.freeze({
     models: {
-        // Empty source = the one selected in SillyTavern right now.
-        source: '',
-        scan: 'claude-haiku-5-5',
-        heavy: 'claude-opus-5-5',
+        // Any AI whose key is saved in SillyTavern works.
+        // Empty source = the API selected in SillyTavern right now.
+        // Empty model = the model selected there; for Claude the recommended
+        // pair is used instead (Haiku 5.5 for scans, Opus 5.5 for fixes).
+        scanSource: '',
+        heavySource: '',
+        scan: '',
+        heavy: '',
         scanEffort: 'low',
         heavyEffort: 'medium',
+        // 0 = automatic
+        scanMaxTokens: 0,
+        heavyMaxTokens: 0,
     },
     // Which model handles which task: 'scan' (cheap) or 'heavy'.
     tasks: {

@@ -37,17 +37,63 @@ const MODEL_FIELD = {
     workers_ai: 'workers_ai_model',
 };
 
+/** Model chosen in SillyTavern for a Chat Completion source. */
+export function chatModelFor(stSettings, source) {
+    const oai = stSettings?.oai_settings || {};
+    const field = MODEL_FIELD[source];
+    let model = field ? oai[field] : '';
+    if (source === 'openrouter' && model === 'OR_Website') model = '';
+    return model || '';
+}
+
+// Paid Text Completion services have fixed addresses; local ones come from server_urls.
+const TEXTGEN_SERVERS = {
+    featherless: 'https://api.featherless.ai/v1',
+    mancer: 'https://neuro.mancer.tech',
+    togetherai: 'https://api.together.xyz',
+    infermaticai: 'https://api.totalgpt.ai',
+    dreamgen: 'https://dreamgen.com',
+    openrouter: 'https://openrouter.ai/api',
+};
+
+const TEXTGEN_MODEL_FIELD = {
+    ooba: 'custom_model',
+    generic: 'generic_model',
+    mancer: 'mancer_model',
+    togetherai: 'togetherai_model',
+    infermaticai: 'infermaticai_model',
+    dreamgen: 'dreamgen_model',
+    openrouter: 'openrouter_model',
+    vllm: 'vllm_model',
+    aphrodite: 'aphrodite_model',
+    ollama: 'ollama_model',
+    featherless: 'featherless_model',
+    tabby: 'tabby_model',
+    llamacpp: 'llamacpp_model',
+};
+
+export function textgenInfo(stSettings) {
+    const tg = stSettings?.textgenerationwebui_settings || {};
+    const type = tg.type || '';
+    const server = TEXTGEN_SERVERS[type] ?? tg.server_urls?.[type] ?? '';
+    const model = type === 'huggingface' ? 'tgi' : (tg[TEXTGEN_MODEL_FIELD[type]] || '');
+    return { type, server, model };
+}
+
 export function connectionInfo(stSettings) {
     const oai = stSettings?.oai_settings || {};
     const source = oai.chat_completion_source || '';
-    const modelField = MODEL_FIELD[source];
-    let model = modelField ? oai[modelField] : '';
-    if (source === 'openrouter' && model === 'OR_Website') model = '';
-    const isChatCompletion = (stSettings?.main_api || 'openai') === 'openai';
+    const mainApi = stSettings?.main_api || 'openai';
+    const isChatCompletion = mainApi === 'openai';
+    const text = textgenInfo(stSettings);
     return {
-        mainApi: stSettings?.main_api || '',
+        mainApi,
+        // 'chat' = Chat Completion, 'text' = Text Completion, other APIs are not supported
+        api: isChatCompletion ? 'chat' : mainApi === 'textgenerationwebui' ? 'text' : 'other',
         source,
-        model: model || '',
+        model: chatModelFor(stSettings, source),
+        textType: text.type,
+        textModel: text.model,
         contextSize: Number(isChatCompletion ? oai.openai_max_context : stSettings?.max_context) || 0,
         responseSize: Number(isChatCompletion ? oai.openai_max_tokens : stSettings?.amount_gen) || 0,
     };
@@ -70,7 +116,8 @@ export function connectionBody(stSettings, source) {
     const oai = stSettings?.oai_settings || {};
     const body = {};
     const proxySources = ['claude', 'openai', 'mistralai', 'makersuite', 'vertexai', 'deepseek', 'xai', 'zai', 'moonshot'];
-    if (oai.reverse_proxy && proxySources.includes(source)) {
+    // The reverse proxy in SillyTavern belongs to the source selected there, not to any other one.
+    if (oai.reverse_proxy && proxySources.includes(source) && source === oai.chat_completion_source) {
         body.reverse_proxy = oai.reverse_proxy;
         body.proxy_password = oai.proxy_password;
     }
